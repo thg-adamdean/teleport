@@ -348,6 +348,18 @@ func ApplyTraits(r types.Role, traits map[string][]string) types.Role {
 		r.SetHostGroups(condition,
 			applyValueTraitsSlice(r.GetHostGroups(condition), traits, "host_groups"))
 
+		inHostSudoers := r.GetHostSudoers(condition)
+		var outHostSudoers []string
+		for _, entry := range inHostSudoers {
+			vals, err := ApplyValueTraits(entry, traits)
+			if err != nil && !trace.IsNotFound(err) {
+				log.Warnf("did not apply trait to sudoers entry: %v", err)
+				break
+			}
+			outHostSudoers = append(outHostSudoers, vals...)
+		}
+		r.SetHostSudoers(condition, outHostSudoers)
+
 		options := r.GetOptions()
 		for i, ext := range options.CertExtensions {
 			vals, err := ApplyValueTraits(ext.Value, traits)
@@ -626,6 +638,8 @@ func (set RuleSet) Slice() []types.Rule {
 type HostUsersInfo struct {
 	// Groups is the list of groups to include host users in
 	Groups []string
+	// Sudoers is a list of entries for a users sudoers file
+	Sudoers []string
 }
 
 // FromSpec returns new RoleSet created from spec
@@ -2078,6 +2092,7 @@ func (set RoleSet) EnhancedRecordingSet() map[string]bool {
 // a role disallows host user creation
 func (set RoleSet) HostUsers(s types.Server) (*HostUsersInfo, error) {
 	groups := make(map[string]struct{})
+	sudoers := make(map[string]struct{})
 	serverLabels := s.GetAllLabels()
 	for _, role := range set {
 		result, _, err := MatchLabels(role.GetNodeLabels(types.Allow), serverLabels)
@@ -2097,6 +2112,9 @@ func (set RoleSet) HostUsers(s types.Server) (*HostUsersInfo, error) {
 		for _, group := range role.GetHostGroups(types.Allow) {
 			groups[group] = struct{}{}
 		}
+		for _, sudoer := range role.GetHostSudoers(types.Allow) {
+			sudoers[sudoer] = struct{}{}
+		}
 	}
 	for _, role := range set {
 		result, _, err := MatchLabels(role.GetNodeLabels(types.Deny), serverLabels)
@@ -2109,10 +2127,14 @@ func (set RoleSet) HostUsers(s types.Server) (*HostUsersInfo, error) {
 		for _, group := range role.GetHostGroups(types.Deny) {
 			delete(groups, group)
 		}
+		for _, sudoer := range role.GetHostSudoers(types.Deny) {
+			delete(sudoers, sudoer)
+		}
 	}
 
 	return &HostUsersInfo{
-		Groups: utils.StringsSliceFromSet(groups),
+		Groups:  utils.StringsSliceFromSet(groups),
+		Sudoers: utils.StringsSliceFromSet(sudoers),
 	}, nil
 }
 
