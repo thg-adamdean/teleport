@@ -1,0 +1,126 @@
+---
+title: Configure Teleport to Create Host Users
+description: How to configure Teleport to automatically create transient host users.
+---
+
+Teleport's SSH Service can be configured to automatically create local Unix users
+upon login.
+
+Host users created by Teleport are transient and will be deleted at the end of an SSH
+session. This feature has overlap with the [PAM](./ssh-pam.mdx) integration, however
+it provides some additional convenience of not having to manually configure a PAM
+script to create and delete users.
+
+It also has benefits over manually creating users as it allows for separate host
+users for each member of an organization. This allows for more fine grained control
+of permissions on a given host.
+
+## Prerequisites
+
+(!docs/pages/includes/edition-prereqs-tabs.mdx!)
+
+- A running Teleport Node. See the [Server Access Getting Started Guide](../getting-started.mdx) for  how to add a Node to your Teleport cluster.
+- The following utilities should be available in the PATH for the Teleport SSH Service:
+  - `useradd`
+  - `userdel`
+  - `usermod`
+  - `groupadd`
+  - `getent`
+  - `visudo`
+
+(!docs/pages/includes/tctl.mdx!)
+
+## Step 1/2. Configure a role
+
+First, create a role with `create_host_user` set to `true`. This will allow users
+with this role to have transient host users created at login time.
+
+This role will allow users to login as `nginxrestarter` on any matching Node. The
+host user will be created and added to the groups listed in `host_groups`. They will
+also be given permission to restart the Nginx service as root.
+
+Save the below file as `auto-users.yaml`
+
+```yaml
+kind: role
+version: v5
+metadata:
+  name: auto-users
+spec:
+  options:
+    # allow automatic creation of users.
+    create_host_user: true
+  allow:
+    logins: [ "nginxrestarter" ]
+    # list of host groups the created user will be added to. Any that dont already exist are created.
+    host_groups: [ubuntu, nginx, other]
+    # list of entries to include in a temporary sudoers file created in /etc/sudoers.d
+    host_sudoers: [
+       # This line will allow the `nginxrestarter` user to run `systemctl restart nginx.service` as
+       # root without requiring a password.
+       #
+       # sudoers file reference documentation: https://www.sudo.ws/docs/man/1.8.17/sudoers.man/
+       "{{internal.logins}} ALL = (root) NOPASSWD: /usr/bin/systemctl restart nginx.service"
+    ]
+    node_labels:
+      'env': 'devel'
+```
+Create the role:
+```code
+$ tctl create -f auto-users.yaml
+# role 'auto-users' has been created
+```
+
+Each value of the `logins` field must conform to the username requirements
+of the Linux distribution being used. See [User/Group Name Syntax](https://systemd.io/USER_NAMES/) for requirements in common distributions.
+
+NOTE: All Teleport user roles matching a node **must** include `create_host_user:
+true` in order to make use of automatic user creation. If all roles do not match,
+user creation will
+
+If an SSH Node must never allow the automatic creation of host users
+`disable_create_host_users` can set to `true` in the Teleport configuration:
+
+```yaml
+# teleport.yml
+teleport:
+  nodename: node
+ssh_service:
+  enabled: true
+  # disable automatic host user creation on this node, regardless of role permissions.
+  disable_create_host_users: true 
+```
+
+l be disabled.
+
+## Step 2/2 Test host user creation
+
+When you connect to a remote Node via `tsh`, and host user creation is enabled, the
+Teleport SSH Service will automatically create a user on the host:
+```code
+$ tsh login
+$ tsh ssh nginxrestarter@develnode
+$ grep "nginxrestarter" /etc/passwd
+# nginxrestarter:x:1001:1003::/home/nginxrestarter:/bin/bash
+$ grep "other" /etc/group
+# other:x:1002:nginxrestarter
+$ exit
+$ tsh ssh admin@develnode # checking the user was deleted after logout
+$ grep "teleportuser" /etc/passwd
+$ echo $?
+# 1
+```
+
+When logging in, the `nginxrestarter` user and any groups that do not already exist
+will be created on the host. The `nginxrestarter` user will be added to the `ubuntu`,
+`nginx` and `other` groups as specified in the `host_groups` field.
+
+A file will also be created in `/etc/sudoers.d` with the contents of the
+`host_sudoers` file written with one entry per line.
+
+The session can then proceed as usual, however once the SSH session ends, the user
+will be automatically removed and their home directory will be deleted. Groups that
+were created will remain on the system after the session ends.
+
+Should a Teleport SSH instance be restarted while a session is in progress, the user
+will be cleaned up at the next Teleport restart.
