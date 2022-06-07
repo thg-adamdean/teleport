@@ -103,27 +103,26 @@ Where:
 - `tls_ca_certs` is a list of PEM encoded x509 certificate of the certificate authority of the cluster.
 - `ssh_ca_certs` is a list of SSH certificate authorities encoded in the authorized_keys format.
 - `role` is the role the agent is operating. If agent is running with multiple roles, i.e. app, kube..., multiple entries will be added, one for each role.
-- `TELEPORT_REPLICA_NAME` is the teleport agent replica name. Constant when using Deployments, `TELEPORT_REPLICA_NAME={{ .Release.Name}}` or dynamic when using Statefulsets, `TELEPORT_REPLICA_NAME=metadata.name`.
+- `TELEPORT_REPLICA_NAME` is the teleport agent replica name. In Kubernetes this variable exposes the POD name `TELEPORT_REPLICA_NAME=metadata.name`.
 
 #### RBAC Changes
 
 The Teleport agent service account must be able to create, read and update secrets within the namespace, therefore, Helm must create a new namespace role and attach it to the agent service account with the following content:
 
 ```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: { .Release.Name }-secrets
+  namespace: { .Release.Namespace }
+rules:
 - apiGroups: [""]
   # objects is "secrets"
   resources: ["secrets"]
-  verbs: ["create"] # create must have a special case in RBAC since we cannot block creation of the secret based on resource name.
-- apiGroups: [""]
-  # objects is "secrets"
-  resources: ["secrets"]
-  resourcesNames: 
-  - "{.Release.Name}-state-{{$TELEPORT_REPLICA_NAME}}" # initial secrets
-  - ... # other identities if # replicas is higher than 1
-  verbs: ["get", "update","watch", "list"]
+  verbs: ["create", "get", "update","watch", "list"]
 ```
 
-The RBAC only allows the service account to read and update the secrets listed under `resourceNames` entry. The `create` verb must be handled in a separate case because during the authorization process, Kubernetes does not know the resource name and cannot allow its creation [[rbac]].
+The RBAC only allows the service account to read and update the secrets created under `{ .Release.Namespace }`.
 
 ### Teleport Changes
 
@@ -257,9 +256,9 @@ type IdentityBackend interface {
 }
 ```
 
-During the startup procedure, the agent identifies that it is running inside Kubernetes. The identification can be achieved by checking the presence of the service account mount path `/var/run/secrets/kubernetes.io`. Although Kubernetes has an option that can disable this mount path, `automountServiceAccountToken: false`, this option is always `true` in our helm chart since we require it for handling the secrets.
+During the startup procedure, the agent identifies that it is running inside Kubernetes. The identification can be achieved by checking the presence of the service account mount path `/var/run/secrets/kubernetes.io`. Although Kubernetes has an option that can disable this mount path, `automountServiceAccountToken: false`, this option is always `true` in our helm chart since we require it for handling the secrets via Kubernetes API and if the service account is not present, Teleport must avoid using secrets and fallback to local storage.
 
-If the agent detects that it is running in Kubernetes, it instantiates a backend for Kubernetes Secret. This backend creates a client with configuration provided by `restclient.InClusterConfig()`, which uses the service account token mounted in the pod. With this, the agent can operate the secret by creating, updating, and reading the secret data. To prevent multiple agents from racing each other when writing in the secret, the Kubernetes Storage engine might use the resource lock feature from Kubernetes (`resourceVersion`) to implement optimistic locking.
+If the agent detects that it is running in Kubernetes, it instantiates a backend for Kubernetes Secret. This backend creates a client with configuration provided by `restclient.InClusterConfig()`, which uses the service account token mounted in the pod. With this, the agent can operate the secret by creating, updating, and reading the secret data. 
 
 For a compatibility layer, if the secret does not exist in Kubernetes, but locally we have the SQLite database, this means storage is enabled, and the agent had already joined the cluster in the past. Hereby, the agent can inherit the credentials stored in the database and write them in Kubernetes secret ([more details](#upgrade-plans-from-pre-rfd-to-pos-rfd)).
 
@@ -275,20 +274,21 @@ Once the new identity is received by the agent, it will store its state, indicat
 
 Switching from local to Kubernetes Secret storage will not change the behavior, it just changes the storage location and storage structure.  
 
+### Limitations
+
+High availability can only be achieved using Statefulsets and not by Deployments. This means the [Helm chart](https://github.com/gravitational/teleport/tree/master/examples/chart/teleport-kube-agent) has to switch to Statefulset objects even if previously was running as Deployment. This change is required because at least one invariant must be kept across restarts to correctly map each agent pod and its identity Secret. The invariant used is the Statefulset pod name `{{ .Release.Name }}-{0...replicas}}`.
+
+Given this, it is required to expose the `$TELEPORT_REPLICA_NAME` environment variable to each pod in order to the backend storage be able to write the identity separately. The values for `$TELEPORT_REPLICA_NAME` are populated by Kubernetes with the pod name by setting it to use the `fieldPath: metadata.name` value.
+
+If the action is an upgrade and previously the agent was running as Deployment, Helm chart will keep the Deployment (it upgrades it to the version the operator chooses) in order to maintain the cluster accessible and install, as well, the Statefulset. This means that after a successful installation we might end up with multiple replicas from both Deployment and Statefulset writing into different secrets. Since Pods created from Deployments have random names each time a pod is recreated a new secret is generated creating a lot of garbage. In order to prevent that, when running in Deployment mode, the agent will clean the secret it created using a `preStop` hook.
+
 ### Upgrade from PRE-RFD versions
 
-When upgrading from PRE-RFD into versions that implement this RFD, we have three scenarios based on pre-existing configuration. They are described in the table below.
-
-| Storage | Replicas >1 | Scenario |
-|---|---|---|
-| true | false |  (1) |
-| true | true |  (1)  |
-| false | false | (2) |
-| false | true |  (3) |
+When upgrading from PRE-RFD into versions that implement this RFD, we have two scenarios based on pre-existing configuration.
 
 A description of each case's caveats is available below.
 
-1. Storage is available:  `Statefulset -> Statefulset`
+1. Storage was available:  `Statefulset -> Statefulset`
     
     When storage is available, it means that identity and state were previously stored in the local database in PV. This means that the agent is able to read the local file and store that information in a new Kubernetes Secret, deleting the local database once the operation was successful.
     
@@ -297,35 +297,18 @@ A description of each case's caveats is available below.
     A descriptive comment and deprecation must be added to the storage section detailing the upgrade process. First, it's required in order to read the agent identity from local storage, and later it can be disabled.
 
 
-2. Storage is not available; Replicas = 1:  `Deployment -> Deployment`
+2. Storage was not available: `Deployment -> Statefulset`
 
-    This is the simplest case. Deployments do not keep the local storage across recycle cycles, so the invite token should [^should] be a long-lived/static token. This means that the new agent can join the cluster using the invite token and later create the Secret in Kubernetes for later reuses.
-
-    [^should]: should because it might not be the case, but it will fail anyway since even if the upgrade is not done, a simple restart will result in the agent not being able to join the cluster.
-
-    Later, the operator might invalidate the token in Teleport, so it is not available for reuse.
-
-
-3. Storage is not available; Replicas > 1:  `Deployment -> Statefulset`
-
-    If storage was not available, Helm chart installed the assets as a Deployment. Due to [limitations](#limitations), the current RFD forces the usage of Statefulset when running in high availability mode. This means that for this case, Helm chart will remove the Deployment and create a Statefulset. Helm manages this change by destroying the Deployment object and creating the new Statefulset. During this transition, even if the operator has the PodDisruptionBudget object enabled, the Kubernetes cluster might become inaccessible from Teleport for some time because there is no guarantee that the system has at least one agent replica running.
+    If storage was not available, Helm chart installed the assets as a Deployment. Due to [limitations](#limitations), the current RFD forces the usage of Statefulset. This means that for this case, if no action is taken Helm chart will switch from Deployment to a Statefulset. Helm manages this change by destroying the Deployment object and creating the new Statefulset. During this transition, even if the operator has the `PodDisruptionBudget` object enabled, the Kubernetes cluster might become inaccessible from Teleport for some time because there is no guarantee that the system has at least one agent replica running. So in order to prevent the downtime, Helm chart will keep the Deployment if it already exists in the cluster, but it will also install in parallel the Statefulset. In order to inform the user of following actions, it will render a custom message to the operator saying that once the Statefulset pods are running he can safely delete the Deployment.
+    The message will also contain the two commands necessary to automatically delete the Deployment once the Statefulset pods are running.
+    ```bash
+        $ kubectl wait --for=condition=available statefulset/{ .Release.Name } -n { .Release.Namespace } --timeout=10m
+        $ kubectl delete deployment/{ .Release.Name } -n { .Release.Namespace }
+    ```
 
     Regarding the invite token, since it was running as deployment, it should be using a long-lived/static token as described in the case above, and it should not create any issue when joining the cluster with that invite token if it is still valid.
 
 
-### Limitations
-
-High availability can only be achieved using Statefulsets and not Deployments. This means that if the desired number of replicas is bigger than one, i.e, `replicas > 1`, the [Helm chart](https://github.com/gravitational/teleport/tree/master/examples/chart/teleport-kube-agent) has to switch to Statefulset objects instead of Deployments. This change is required because at least one invariant must be kept across restarts to correctly map each agent pod and its identity Secret. The invariant used is the Statefulset pod name `{{ .Release.Name }}-{0...replicas}}`.
-
-Given this, it is required to expose the `$TELEPORT_REPLICA_NAME` environment variable to each pod in order to the backend storage be able to write the identity separately. The values for `$TELEPORT_REPLICA_NAME` are dependent on the object type:
-
-- Deployment: `TELEPORT_REPLICA_NAME` is a constant string `{{ .Release.Name }}`.
-- Statefulset: `TELEPORT_REPLICA_NAME` is a dynamic value provided by Kubernetes `fieldPath: metadata.name`.
-
-Another limitation appears when the operator wants to increase the number of replicas. It is a requirement that they must execute the upgrade process through Helm. If the operator does a manual increase of the number of replicas by editing the Kubernetes objects, it will cause the following limitations, depending on the object type:
-
-- `Deployment`: all agents will use the same identity when accessing the cluster.
-- `Statefulset`: some replicas might fail to start. They will try to join the cluster again because they cannot read their secrets. This happens because each replica will have its own identity secret and RBAC only lists access rules to some of them, resulting in some pods not being able to read the secrets, and eventually they will trigger the cluster invitation process each time they restart.
 
 ### Helm Chart Differences
 
@@ -366,8 +349,8 @@ data:
 # in the statefulset.yaml file.
 #
 -{{- if not .Values.storage.enabled }}
++{{- if and (not .Values.storage.enabled) ( .Release.IsUpgrade ) }}
 {{- $replicaCount := (coalesce .Values.replicaCount .Values.highAvailability.replicaCount "1") }}
-+{{- if and (not .Values.storage.enabled) (eq $replicaCount 1) }}
 ...
 -        {{- if .Values.extraEnv }}
 -        env:
@@ -375,7 +358,9 @@ data:
 -        {{- end }}
 +        env:
 +          - name: TELEPORT_REPLICA_NAME
-+            value: {{ .Release.Name }}
++            valueFrom:
++              fieldRef:
++                 fieldPath: metadata.name
 +         {{- if .Values.extraEnv }}
 +          {{- toYaml .Values.extraEnv | nindent 8 }}
 +        {{- end }}
@@ -390,7 +375,7 @@ data:
 #
 -{{- if .Values.storage.enabled }}
 {{- $replicaCount := (coalesce .Values.replicaCount .Values.highAvailability.replicaCount "1") }}
-+{{- if or (.Values.storage.enabled) (ne $replicaCount 1) }}
++{{- if or (.Values.storage.enabled) (not .Release.IsUpgrade) }}
 ...
 -        {{- if .Values.extraEnv }}
 -        env:
