@@ -16,29 +16,34 @@ import (
 )
 
 type AuditEventEmitCollection struct {
-	Calls []*ast.CallExpr
+	Calls []*ast.SelectorExpr
 	mu    *sync.Mutex
 }
 
-func (a *AuditEventEmitCollection) addEmitCall(c *ast.CallExpr) {
+func (a *AuditEventEmitCollection) addEmitCall(c *ast.SelectorExpr) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.Calls = append(a.Calls, c)
 }
 
-// TODO: Use astutil.Apply
+// TODO: Change addEmitCall so it records the args as well. Maybe make Calls a slice of some type rather than *ast.SelectorExpr.
 
 func main() {
+	col := AuditEventEmitCollection{
+		Calls: []*ast.SelectorExpr{},
+		mu:    &sync.Mutex{},
+	}
 	s := token.NewFileSet()
 	filepath.Walk(path.Join("..", ".."), func(pth string, i fs.FileInfo, err error) error {
 		if strings.HasSuffix(i.Name(), ".go") {
 			f, err := parser.ParseFile(s, pth, nil, 0)
 			for _, d := range f.Decls {
 				astutil.Apply(d, func(c *astutil.Cursor) bool {
-					if i, ok := c.Node().(*ast.Ident); ok && i.Name == "EmitAuditEvent" {
-						// TODO: Figure out what "i" indicates within the source, and how to get
-						// the Metadata of the argument to EmitAuditEvent
-						fmt.Printf("this is an ident: %v\n", i)
+					if i, ok := c.Node().(*ast.CallExpr); ok {
+						if e, ok := i.Fun.(*ast.SelectorExpr); ok && e.Sel.Name == "EmitAuditEvent" {
+							col.addEmitCall(e)
+						}
+
 					}
 					return true
 				}, nil)
