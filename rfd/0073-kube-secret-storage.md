@@ -309,7 +309,6 @@ A description of each case's caveats is available below.
     Regarding the invite token, since it was running as deployment, it should be using a long-lived/static token as described in the case above, and it should not create any issue when joining the cluster with that invite token if it is still valid.
 
 
-
 ### Helm Chart Differences
 
 #### File *templates/config.yaml*
@@ -349,7 +348,8 @@ data:
 # in the statefulset.yaml file.
 #
 -{{- if not .Values.storage.enabled }}
-+{{- if and (not .Values.storage.enabled) ( .Release.IsUpgrade ) }}
++{{- $deployment := lookup "v1" "Deployment" .Release.Namespace .Release.Name -}}
++{{- if and (not .Values.storage.enabled) ( $deployment ) }}
 {{- $replicaCount := (coalesce .Values.replicaCount .Values.highAvailability.replicaCount "1") }}
 ...
 -        {{- if .Values.extraEnv }}
@@ -375,7 +375,6 @@ data:
 #
 -{{- if .Values.storage.enabled }}
 {{- $replicaCount := (coalesce .Values.replicaCount .Values.highAvailability.replicaCount "1") }}
-+{{- if or (.Values.storage.enabled) (not .Release.IsUpgrade) }}
 ...
 -        {{- if .Values.extraEnv }}
 -        env:
