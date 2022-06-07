@@ -27,14 +27,6 @@
             {
               "title": "Docker Compose",
               "slug": "/getting-started/docker-compose/"
-            },
-            {
-              "title": "DigitalOcean",
-              "slug": "/getting-started/digitalocean/",
-              "hideInScopes": [
-                "enterprise",
-                "cloud"
-              ]
             }
           ]
         },
@@ -45,10 +37,6 @@
         {
           "title": "FAQ",
           "slug": "/faq/"
-        },
-        {
-          "title": "Changelog",
-          "slug": "/changelog/"
         }
       ]
     },
@@ -113,6 +101,11 @@
               "title": "IBM",
               "slug": "/setup/deployments/ibm/",
               "hideInScopes": "cloud"
+            },
+            {
+              "title": "Digital Ocean",
+              "slug": "/setup/deployments/digitalocean/",
+              "hideInScopes": ["enterprise", "cloud"]
             }
           ]
         },
@@ -735,11 +728,15 @@
     },
     {
       "icon": "wand",
-      "title": "Preview",
+      "title": "Releases",
       "entries": [
         {
           "title": "Upcoming Releases",
-          "slug": "/preview/upcoming-releases/"
+          "slug": "/releases/upcoming-releases/"
+        },
+        {
+            "title": "Changelog",
+            "slug": "/releases/changelog/"
         }
       ]
     },
@@ -1265,6 +1262,26 @@
     {
       "source": "/application-access/guides/jwt/",
       "destination": "/application-access/jwt/",
+      "permanent": true
+    },
+    {
+      "source": "/preview/upcoming-releases/",
+      "destination": "/releases/upcoming-releases/",
+      "permanent": true
+    },
+    {
+      "source": "/changelog/",
+      "destination": "/releases/changelog/",
+      "permanent": true
+    },
+    {
+      "source": "/adopters/",
+      "destination": "https://goteleport.com/case-study/",
+      "permanent": true
+    },
+    {
+      "source": "/getting-started/digitalocean/",
+      "destination": "/setup/deployments/digitalocean/",
       "permanent": true
     }
   ]
