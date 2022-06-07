@@ -37,15 +37,14 @@ import (
 // - Update Servers -> Standby: So we can stop trusting the old CA.
 
 func (b *Bot) caRotationLoop(ctx context.Context) error {
-	for {
+	for ctx.Err() != nil {
 		err := b.watchCARotations(ctx)
 		if err != nil {
 			return trace.Wrap(err)
 		}
-		if ctx.Err() != nil {
-			return nil
-		}
 	}
+
+	return nil
 }
 
 func (b *Bot) watchCARotations(ctx context.Context) error {
@@ -63,7 +62,7 @@ func (b *Bot) watchCARotations(ctx context.Context) error {
 	for {
 		select {
 		case event := <-watcher.Events():
-			b.log.Debugf("Recieved event: %+v", event)
+			b.log.Debugf("Received event: %+v", event)
 			if event.Type == types.OpInit {
 				b.log.Infof("Started watching for CA rotations")
 				continue
@@ -74,11 +73,20 @@ func (b *Bot) watchCARotations(ctx context.Context) error {
 			}
 			ca, ok := event.Resource.(types.CertAuthority)
 			if !ok {
+				// TODO: Determine if we should take more drastic action here.
+				// Realistically, if other event types are being delivered,
+				// there's probably been some element of developer error. We
+				// could hypothetically panic here.
 				b.log.Debugf(
 					"Skipping unexpected event type: %v for %v",
 					event.Type, event.Resource.GetName(),
 				)
 				continue
+			}
+
+			phase := ca.GetRotation().Phase
+			if phase == "init" || phase == "update_servers" {
+				b.log.Debug("Skipping due to phase: %s", phase)
 			}
 			b.log.Debugf("CA: %+v", ca)
 
